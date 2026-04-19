@@ -19,6 +19,9 @@ jobs:
   docker:
     uses: ./.github/workflows/docker.yml
     secrets: inherit
+    permissions:
+      contents: read
+      packages: write
 
   headers:
     needs: docker
@@ -34,8 +37,9 @@ jobs:
         version: [2]
         toolchain: [mips64-octeon-linux-]
         image: [octeon-kernel]
+
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
       - name: Build headers
         run: |
           mkdir /headers
@@ -43,51 +47,33 @@ jobs:
           tar -xf src.tar.bz2 --wildcards 'source/kernel_*' --strip-components 1
           mv kernel_* kernel.tar.gz
           tar -xf kernel.tar.gz --strip-components 1
-          # Apply comprehensive DTC yylloc fix for multiple definition errors
-          echo "Applying comprehensive DTC yylloc fix..."
-          # Fix source files
+          # DTC yylloc fix
           find . -name "dtc-lexer.l" -exec grep -l "YYLTYPE yylloc" {} \; | while read -r file; do
-            echo "Fixing source DTC file: $file"
             sed -i 's/^[[:space:]]*YYLTYPE[[:space:]]\+yylloc[[:space:]]*;[[:space:]]*$/extern YYLTYPE yylloc;/' "$file"
           done
-          # Also fix any shipped/generated files that might exist
           find . -name "dtc-lexer.lex.c*" -exec grep -l "YYLTYPE yylloc" {} \; | while read -r file; do
-            echo "Fixing generated DTC file: $file"
             sed -i 's/^[[:space:]]*YYLTYPE[[:space:]]\+yylloc[[:space:]]*;[[:space:]]*$/extern YYLTYPE yylloc;/' "$file"
           done
           if [ ${{ matrix.version }} -ne 1 ]; then make ARCH=mips ubnt_er_${{ matrix.device }}_defconfig; fi;
-          # Try first make and catch DTC failures
           if ! make -j$(nproc) ARCH=mips CROSS_COMPILE=$CROSS prepare modules_prepare; then
-            echo "First make failed, fixing generated DTC files..."
             find . -name "dtc-lexer.lex.c" -exec grep -l "YYLTYPE yylloc" {} \; | while read -r file; do
-              echo "Fixing newly generated DTC file: $file"
               sed -i 's/^[[:space:]]*YYLTYPE[[:space:]]\+yylloc[[:space:]]*;[[:space:]]*$/extern YYLTYPE yylloc;/' "$file"
             done
-            # Retry make
             make -j$(nproc) ARCH=mips CROSS_COMPILE=$CROSS prepare modules_prepare
           fi
-          make -j$(nproc) ARCH=mips CROSS_COMPILE=$CROSS modules #vmlinux
+          make -j$(nproc) ARCH=mips CROSS_COMPILE=$CROSS modules
           cp Module.symvers .config /headers
           make mrproper
-          # Re-apply DTC yylloc fix after mrproper cleans everything
-          echo "Re-applying comprehensive DTC yylloc fix after mrproper..."
           find . -name "dtc-lexer.l" -exec grep -l "YYLTYPE yylloc" {} \; | while read -r file; do
-            echo "Re-fixing source DTC file: $file"
             sed -i 's/^[[:space:]]*YYLTYPE[[:space:]]\+yylloc[[:space:]]*;[[:space:]]*$/extern YYLTYPE yylloc;/' "$file"
           done
-          # Try second make with catch for DTC failures
           if ! make -j$(nproc) ARCH=mips O=/headers CROSS_COMPILE=$CROSS prepare modules_prepare scripts; then
-            echo "Second make failed, fixing generated DTC files..."
             find . -name "dtc-lexer.lex.c" -exec grep -l "YYLTYPE yylloc" {} \; | while read -r file; do
-              echo "Re-fixing generated DTC file: $file"
               sed -i 's/^[[:space:]]*YYLTYPE[[:space:]]\+yylloc[[:space:]]*;[[:space:]]*$/extern YYLTYPE yylloc;/' "$file"
             done
-            # Retry make
             make -j$(nproc) ARCH=mips O=/headers CROSS_COMPILE=$CROSS prepare modules_prepare scripts
           fi
           rm /headers/source /headers/Makefile
-          # This is from alpine linux who in turn got it from
-          # http://kernel.ubuntu.com/git/ubuntu/ubuntu-zesty.git/tree/debian/rules.d/3-binary-indep.mk
           find . -path './include/*' -prune -o -path './scripts/*' -prune -o -type f \( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) -print | cpio -pdm "/headers"
           cp -a scripts include "/headers"
           find $(find arch -name include -type d -print) -type f | cpio -pdm "/headers"
@@ -104,15 +90,14 @@ jobs:
       image: buildpack-deps:focal
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
       - name: Download module source
         run: |
           curl -L -o amneziawg-linux-kernel-module-$MODULE_VERSION.tar.gz https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/archive/refs/tags/v$MODULE_VERSION.tar.gz
           tar -xf amneziawg-linux-kernel-module-$MODULE_VERSION.tar.gz --one-top-level=module --strip-components=1
           cd module
           sed -i 's/ --dirty//g' src/Makefile
-          patch -p1 < ../siphash_no_fallthrough.patch
-          # Apply netlink API compatibility fixes via Python script to avoid patch conflicts
+          patch -p1 < ../siphash_no_fallthrough.patch || echo "siphash patch already applied or not needed"
           python3 ../fix_netlink_api.py
       - name: Upload module source
         uses: actions/upload-artifact@v4
@@ -133,9 +118,8 @@ jobs:
         toolchain: [mips64-octeon-linux-]
         image: [octeon-kernel]
 
-
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
       - name: Restore module source
         uses: actions/download-artifact@v4
         with:
@@ -148,35 +132,18 @@ jobs:
       - name: Build module
         run: |
           tar -xf headers.tar
-          echo "=== Debugging module build setup ==="
-          echo "Working directory: $(pwd)"
-          echo "Module directory contents:"
-          ls -la module/
-          echo "Module src contents:"
-          ls -la module/src/
-          echo "Headers directory contents:"
-          ls -la headers/ | head -10
-          echo "Checking for critical build files:"
-          ls -la headers/.config headers/Module.symvers headers/scripts/ 2>/dev/null || echo "Some build files missing"
           cd module/src
-          echo "=== Attempting module build ==="
-          echo "Build command: make ARCH=mips CROSS_COMPILE=${{ matrix.toolchain }} KERNELDIR=$GITHUB_WORKSPACE/headers KERNELRELEASE=4.9.0 module"
-          # Force legacy kernel mode since UBNT devices use older kernels (4.x, not 5.6+)
-          # This prevents AmnesiaWG from trying to build in generated/ directory
           make V=1 ARCH=mips CROSS_COMPILE=${{ matrix.toolchain }} KERNELDIR=$GITHUB_WORKSPACE/headers KERNELRELEASE=4.9.0 module
-          # Strip the resulting module (AmnesiaWG produces amneziawg.ko)
           if [ -f amneziawg.ko ]; then
             ${{ matrix.toolchain }}strip --strip-debug amneziawg.ko
-            # Create symlink with expected name for compatibility
             ln -sf amneziawg.ko wireguard.ko
           elif [ -f generated/amneziawg.ko ]; then
             cp generated/amneziawg.ko ./amneziawg.ko
             ${{ matrix.toolchain }}strip --strip-debug amneziawg.ko
-            # Create symlink with expected name for compatibility
             ln -sf amneziawg.ko wireguard.ko
           else
-            echo "ERROR: No amneziawg.ko found after build"
-            find . -name "*.ko" 2>/dev/null || echo "No .ko files found"
+            echo "ERROR: No amneziawg.ko found"
+            find . -name "*.ko"
             exit 1
           fi
       - name: Upload built module
@@ -196,10 +163,8 @@ jobs:
         include:
           - arch: mips
             target: mips-linux-musl
-          - arch: mipsel
-            target: mipsel-linux-musl
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
       - name: Build tools
         env:
           TARGET: ${{ matrix.target }}
@@ -230,7 +195,7 @@ jobs:
         version: [2]
         arch: [mips]
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
       - name: Download module
         uses: actions/download-artifact@v4
         with:
@@ -262,4 +227,33 @@ jobs:
           name: release_${{ matrix.device }}-v${{ matrix.version }}
           path: ${{ matrix.device }}-v${{ matrix.version }}-v${{ env.MODULE_VERSION }}-v${{ env.TOOLS_VERSION }}.deb
 
- 
+  release:
+    runs-on: ubuntu-24.04
+    needs:
+      - package
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download built package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release_*
+          path: release-assets
+          merge-multiple: true
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ env.MODULE_VERSION }}-${{ env.TOOLS_VERSION }}
+          name: "AmneziaWG ${{ env.MODULE_VERSION }}"
+          body: |
+            Built from AmneziaWG module ${{ env.MODULE_VERSION }} and tools ${{ env.TOOLS_VERSION }}.
+
+            **EdgeRouter 6P (e300, EdgeOS v2):** use the e300-v2 .deb.
+          artifacts: "release-assets/*.deb"
+          draft: false
+          prerelease: false
+          allowUpdates: true
+          makeLatest: true
+          token: ${{ secrets.GITHUB_TOKEN }}
