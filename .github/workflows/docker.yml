@@ -9,13 +9,12 @@ on:
   workflow_call:
 
 jobs:
-  # Push image to GitHub Packages.
-  # See also https://docs.docker.com/docker-hub/builds/
   build:
-
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: write
+
     strategy:
         matrix:
           tag: [mips, mipsel, mtk, octeon]
@@ -31,7 +30,7 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/ubnt-build:${{ matrix.tag }}-${{ matrix.type }}
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
 
       - name: Log into GitHub Container Registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
